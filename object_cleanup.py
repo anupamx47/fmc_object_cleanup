@@ -5,7 +5,7 @@ import time
 
 # Script Metadata
 __author__ = "Anupam Pavithran (anpavith@cisco.com)"
-__version__ = "1.0.0"
+__version__ = "1.2.0"
 
 # Disable warnings for unverified HTTPS requests (not recommended for production)
 requests.packages.urllib3.disable_warnings()
