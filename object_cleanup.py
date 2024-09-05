@@ -1,6 +1,7 @@
 import requests
 import json
 import getpass
+import time
 
 # Script Metadata
 __author__ = "Anupam Pavithran (anpavith@cisco.com)"
@@ -85,15 +86,26 @@ def refresh_auth_token(fmc_ip, refresh_token):
         exit()
 
 def fetch_unused_objects(base_url, headers, object_type):
-    try:
-        # Corrected URL structure to match the provided format
-        url = f"{base_url}object/{object_type}?filter=unusedOnly%3Atrue&expanded=true"
-        response = requests.get(url, headers=headers, verify=False)
-        response.raise_for_status()
-        return response.json().get("items", [])
-    except requests.exceptions.HTTPError as err:
-        # Handle other errors gracefully
-        raise
+    objects = []
+    url = f"{base_url}object/{object_type}?filter=unusedOnly%3Atrue&expanded=true"
+    
+    while url:
+        try:
+            response = requests.get(url, headers=headers, verify=False)
+            response.raise_for_status()
+            data = response.json()
+            items = data.get("items", [])
+            objects.extend(items)
+            
+            # Check for the presence of a "next" link in the response
+            url = data.get("paging", {}).get("next",[None])[0]
+            
+        except requests.exceptions.HTTPError as err:
+            print(f"HTTP error occurred: {err}")
+            print(f"Response content: {err.response.content.decode('utf-8')}")
+            raise
+    
+    return objects
 
 def generate_report(auth_token, refresh_token, fmc_ip, domain_uuid, selected_types):
     base_url = get_base_url(fmc_ip, domain_uuid)
@@ -102,7 +114,8 @@ def generate_report(auth_token, refresh_token, fmc_ip, domain_uuid, selected_typ
         'X-auth-access-token': auth_token
     }
 
-    with open("unused_objects_report.txt", "w") as report_file:
+    report_filename = "unused_objects_report.txt"
+    with open(report_filename, "w") as report_file:
         report_file.write("Unused Objects Report\n")
         report_file.write("=====================\n\n")
 
@@ -127,6 +140,17 @@ def generate_report(auth_token, refresh_token, fmc_ip, domain_uuid, selected_typ
                 print(f"HTTP error occurred: {err}")
                 print(f"Response content: {err.response.content.decode('utf-8')}")
                 report_file.write(f"Error processing {object_type}: {err}\n")
+    
+    print(f"Report generated and saved to '{report_filename}'.")
+
+def print_progress_bar(iteration, total, prefix='', suffix='', decimals=1, length=50, fill='█'):
+    percent = ("{0:." + str(decimals) + "f}").format(100 * (iteration / float(total)))
+    filled_length = int(length * iteration // total)
+    bar = fill * filled_length + '-' * (length - filled_length)
+    print(f'\r{prefix} |{bar}| {percent}% {suffix}', end='\r')
+    # Print New Line on Complete
+    if iteration == total: 
+        print()
 
 def delete_unused_objects(auth_token, refresh_token, fmc_ip, domain_uuid, selected_types):
     base_url = get_base_url(fmc_ip, domain_uuid)
@@ -135,7 +159,10 @@ def delete_unused_objects(auth_token, refresh_token, fmc_ip, domain_uuid, select
         'X-auth-access-token': auth_token
     }
 
-    with open("deleted_objects_report.txt", "w") as report_file, open("undeletable_objects_report.txt", "w") as undeletable_file:
+    report_filename = "deleted_objects_report.txt"
+    undeletable_filename = "undeletable_objects_report.txt"
+    
+    with open(report_filename, "w") as report_file, open(undeletable_filename, "w") as undeletable_file:
         report_file.write("Deleted Objects Report\n")
         report_file.write("======================\n\n")
 
@@ -151,7 +178,19 @@ def delete_unused_objects(auth_token, refresh_token, fmc_ip, domain_uuid, select
                     report_file.write(f"No unused {object_type} objects found.\n")
                     continue
 
-                for obj in objects:
+                total_objects = len(objects)
+                print(f"Deleting {total_objects} {object_type} objects...")
+
+                for i, obj in enumerate(objects):
+                    # Check for read-only metadata
+                    if obj.get("metadata", {}).get("readOnly", {}).get("state", False):
+                        name = obj.get('name', 'N/A')
+                        value = obj.get('value', 'N/A')
+                        object_id = obj.get('id', 'N/A')
+                        print(f"Cannot delete system-defined (read-only) {object_type} object: Name: {name}, Value: {value}, ID: {object_id}")
+                        undeletable_file.write(f"System-defined {object_type} object: Name: {name}, Value: {value}, ID: {object_id}\n")
+                        continue
+                    
                     delete_url = f"{base_url}object/{object_type}/{obj['id']}"
                     del_response = requests.delete(delete_url, headers=headers, verify=False)
                     
@@ -176,29 +215,32 @@ def delete_unused_objects(auth_token, refresh_token, fmc_ip, domain_uuid, select
                         object_id = obj.get('id', 'N/A')
                         print(f"Deleted {object_type} object: Name: {name}, Value: {value}, ID: {object_id}")
                         report_file.write(f"Deleted {object_type} object: Name: {name}, Value: {value}, ID: {object_id}\n")
+                    
+                    # Update the progress bar
+                    print_progress_bar(i + 1, total_objects, prefix='Progress', suffix='Complete', length=50)
+
+                report_file.write("\n")
 
             except requests.exceptions.HTTPError as err:
                 print(f"HTTP error occurred: {err}")
                 print(f"Response content: {err.response.content.decode('utf-8')}")
                 report_file.write(f"Error processing {object_type}: {err}\n")
+                undeletable_file.write(f"Error processing {object_type}: {err}\n")
+
+    print(f"Deletion report generated and saved to '{report_filename}'.")
+    print(f"Undeletable objects report generated and saved to '{undeletable_filename}'.")
 
 def main():
     fmc_ip, username, password = get_fmc_credentials()
     auth_token, refresh_token, domain_uuid = get_auth_token(fmc_ip, username, password)
     selected_types = select_object_types()
+
+    action_choice = input("\nWhat would you like to do?\n1: Generate a report of unused objects\n2: Delete unused objects and generate a report\nEnter your choice (1 or 2): ")
     
-    print("\nWhat would you like to do?")
-    print("1: Generate a report of unused objects")
-    print("2: Delete unused objects and generate a report")
-    
-    choice = input("Enter your choice (1 or 2): ").strip()
-    
-    if choice == "1":
+    if action_choice == '1':
         generate_report(auth_token, refresh_token, fmc_ip, domain_uuid, selected_types)
-        print("Report generated and saved to 'unused_objects_report.txt'.")
-    elif choice == "2":
+    elif action_choice == '2':
         delete_unused_objects(auth_token, refresh_token, fmc_ip, domain_uuid, selected_types)
-        print("Deletion process complete. Reports saved to 'deleted_objects_report.txt' and 'undeletable_objects_report.txt'.")
     else:
         print("Invalid choice. Exiting...")
 
